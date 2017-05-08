@@ -3462,6 +3462,101 @@ static int nl80211_put_beacon_int(struct nl_msg *msg, int beacon_int)
 }
 
 
+static int nl80211_put_beacon_rate(struct nl_msg *msg, const u64 flags,
+				   struct wpa_driver_ap_params *params)
+{
+	struct nlattr *bands, *band;
+	struct nl80211_txrate_vht vht_rate;
+
+	if (!params->freq ||
+	    (params->beacon_rate == 0 &&
+	     params->rate_type == BEACON_RATE_LEGACY))
+		return 0;
+
+	bands = nla_nest_start(msg, NL80211_ATTR_TX_RATES);
+	if (!bands)
+		return -1;
+
+	switch (params->freq->mode) {
+	case HOSTAPD_MODE_IEEE80211B:
+	case HOSTAPD_MODE_IEEE80211G:
+		band = nla_nest_start(msg, NL80211_BAND_2GHZ);
+		break;
+	case HOSTAPD_MODE_IEEE80211A:
+		band = nla_nest_start(msg, NL80211_BAND_5GHZ);
+		break;
+	case HOSTAPD_MODE_IEEE80211AD:
+		band = nla_nest_start(msg, NL80211_BAND_60GHZ);
+		break;
+	default:
+		return 0;
+	}
+
+	if (!band)
+		return -1;
+
+	os_memset(&vht_rate, 0, sizeof(vht_rate));
+
+	switch (params->rate_type) {
+	case BEACON_RATE_LEGACY:
+		if (!(flags & WPA_DRIVER_FLAGS_BEACON_RATE_LEGACY)) {
+			wpa_printf(MSG_INFO,
+				   "nl80211: Driver does not support setting Beacon frame rate (legacy)");
+			return -1;
+		}
+
+		if (nla_put_u8(msg, NL80211_TXRATE_LEGACY,
+			       (u8) params->beacon_rate / 5) ||
+		    nla_put(msg, NL80211_TXRATE_HT, 0, NULL) ||
+		    (params->freq->vht_enabled &&
+		     nla_put(msg, NL80211_TXRATE_VHT, sizeof(vht_rate),
+			     &vht_rate)))
+			return -1;
+
+		wpa_printf(MSG_DEBUG, " * beacon_rate = legacy:%u (* 100 kbps)",
+			   params->beacon_rate);
+		break;
+	case BEACON_RATE_HT:
+		if (!(flags & WPA_DRIVER_FLAGS_BEACON_RATE_HT)) {
+			wpa_printf(MSG_INFO,
+				   "nl80211: Driver does not support setting Beacon frame rate (HT)");
+			return -1;
+		}
+		if (nla_put(msg, NL80211_TXRATE_LEGACY, 0, NULL) ||
+		    nla_put_u8(msg, NL80211_TXRATE_HT, params->beacon_rate) ||
+		    (params->freq->vht_enabled &&
+		     nla_put(msg, NL80211_TXRATE_VHT, sizeof(vht_rate),
+			     &vht_rate)))
+			return -1;
+		wpa_printf(MSG_DEBUG, " * beacon_rate = HT-MCS %u",
+			   params->beacon_rate);
+		break;
+	case BEACON_RATE_VHT:
+		if (!(flags & WPA_DRIVER_FLAGS_BEACON_RATE_VHT)) {
+			wpa_printf(MSG_INFO,
+				   "nl80211: Driver does not support setting Beacon frame rate (VHT)");
+			return -1;
+		}
+		vht_rate.mcs[0] = BIT(params->beacon_rate);
+		if (nla_put(msg, NL80211_TXRATE_LEGACY, 0, NULL))
+			return -1;
+		if (nla_put(msg, NL80211_TXRATE_HT, 0, NULL))
+			return -1;
+		if (nla_put(msg, NL80211_TXRATE_VHT, sizeof(vht_rate),
+			    &vht_rate))
+			return -1;
+		wpa_printf(MSG_DEBUG, " * beacon_rate = VHT-MCS %u",
+			   params->beacon_rate);
+		break;
+	}
+
+	nla_nest_end(msg, band);
+	nla_nest_end(msg, bands);
+
+	return 0;
+}
+
+
 static int wpa_driver_nl80211_set_ap(void *priv,
 				     struct wpa_driver_ap_params *params)
 {
@@ -3489,6 +3584,8 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 		    params->tail, params->tail_len);
 	wpa_printf(MSG_DEBUG, "nl80211: ifindex=%d", bss->ifindex);
 	wpa_printf(MSG_DEBUG, "nl80211: beacon_int=%d", params->beacon_int);
+	wpa_printf(MSG_DEBUG, "nl80211: beacon_rate=%u", params->beacon_rate);
+	wpa_printf(MSG_DEBUG, "nl80211: rate_type=%d", params->rate_type);
 	wpa_printf(MSG_DEBUG, "nl80211: dtim_period=%d", params->dtim_period);
 	wpa_hexdump_ascii(MSG_DEBUG, "nl80211: ssid",
 			  params->ssid, params->ssid_len);
@@ -3498,6 +3595,7 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 	    nla_put(msg, NL80211_ATTR_BEACON_TAIL, params->tail_len,
 		    params->tail) ||
 	    nl80211_put_beacon_int(msg, params->beacon_int) ||
+	    nl80211_put_beacon_rate(msg, drv->capa.flags, params) ||
 	    nla_put_u32(msg, NL80211_ATTR_DTIM_PERIOD, params->dtim_period) ||
 	    nla_put(msg, NL80211_ATTR_SSID, params->ssid_len, params->ssid))
 		goto fail;
@@ -9228,6 +9326,205 @@ fail:
 	nlmsg_free(msg);
 	return -1;
 }
+
+
+#ifdef CONFIG_MBO
+
+static enum mbo_transition_reject_reason
+nl80211_mbo_reject_reason_mapping(enum qca_wlan_btm_candidate_status status)
+{
+	switch (status) {
+	case QCA_STATUS_REJECT_EXCESSIVE_FRAME_LOSS_EXPECTED:
+		return MBO_TRANSITION_REJECT_REASON_FRAME_LOSS;
+	case QCA_STATUS_REJECT_EXCESSIVE_DELAY_EXPECTED:
+		return MBO_TRANSITION_REJECT_REASON_DELAY;
+	case QCA_STATUS_REJECT_INSUFFICIENT_QOS_CAPACITY:
+		return MBO_TRANSITION_REJECT_REASON_QOS_CAPACITY;
+	case QCA_STATUS_REJECT_LOW_RSSI:
+		return MBO_TRANSITION_REJECT_REASON_RSSI;
+	case QCA_STATUS_REJECT_HIGH_INTERFERENCE:
+		return MBO_TRANSITION_REJECT_REASON_INTERFERENCE;
+	case QCA_STATUS_REJECT_UNKNOWN:
+	default:
+		return MBO_TRANSITION_REJECT_REASON_UNSPECIFIED;
+	}
+}
+
+
+static void nl80211_parse_btm_candidate_info(struct candidate_list *candidate,
+					     struct nlattr *tb[], int num)
+{
+	enum qca_wlan_btm_candidate_status status;
+	char buf[50];
+
+	os_memcpy(candidate->bssid,
+		  nla_data(tb[QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO_BSSID]),
+		  ETH_ALEN);
+
+	status = nla_get_u32(
+		tb[QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO_STATUS]);
+	candidate->is_accept = status == QCA_STATUS_ACCEPT;
+	candidate->reject_reason = nl80211_mbo_reject_reason_mapping(status);
+
+	if (candidate->is_accept)
+		os_snprintf(buf, sizeof(buf), "Accepted");
+	else
+		os_snprintf(buf, sizeof(buf),
+			    "Rejected, Reject_reason: %d",
+			    candidate->reject_reason);
+	wpa_printf(MSG_DEBUG, "nl80211:   BSSID[%d]: " MACSTR " %s",
+		   num, MAC2STR(candidate->bssid), buf);
+}
+
+
+static int
+nl80211_get_bss_transition_status_handler(struct nl_msg *msg, void *arg)
+{
+	struct wpa_bss_candidate_info *info = arg;
+	struct candidate_list *candidate = info->candidates;
+	struct nlattr *tb_msg[NL80211_ATTR_MAX + 1];
+	struct nlattr *tb_vendor[QCA_WLAN_VENDOR_ATTR_MAX + 1];
+	struct nlattr *tb[QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO_MAX + 1];
+	static struct nla_policy policy[
+		QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO_MAX + 1] = {
+		[QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO_BSSID] = {
+			.minlen = ETH_ALEN
+		},
+		[QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO_STATUS] = {
+			.type = NLA_U32,
+		},
+	};
+	struct nlattr *attr;
+	int rem;
+	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
+	u8 num;
+
+	num = info->num; /* number of candidates sent to driver */
+	info->num = 0;
+	nla_parse(tb_msg, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
+		  genlmsg_attrlen(gnlh, 0), NULL);
+
+	if (!tb_msg[NL80211_ATTR_VENDOR_DATA] ||
+	    nla_parse_nested(tb_vendor, QCA_WLAN_VENDOR_ATTR_MAX,
+			     tb_msg[NL80211_ATTR_VENDOR_DATA], NULL) ||
+	    !tb_vendor[QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO])
+		return NL_SKIP;
+
+	wpa_printf(MSG_DEBUG,
+		   "nl80211: WNM Candidate list received from driver");
+	nla_for_each_nested(attr,
+			    tb_vendor[QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO],
+			    rem) {
+		if (info->num >= num ||
+		    nla_parse_nested(
+			    tb, QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO_MAX,
+			    attr, policy) ||
+		    !tb[QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO_BSSID] ||
+		    !tb[QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO_STATUS])
+			break;
+
+		nl80211_parse_btm_candidate_info(candidate, tb, info->num);
+
+		candidate++;
+		info->num++;
+	}
+
+	return NL_SKIP;
+}
+
+
+static struct wpa_bss_candidate_info *
+nl80211_get_bss_transition_status(void *priv, struct wpa_bss_trans_info *params)
+{
+	struct i802_bss *bss = priv;
+	struct wpa_driver_nl80211_data *drv = bss->drv;
+	struct nl_msg *msg;
+	struct nlattr *attr, *attr1, *attr2;
+	struct wpa_bss_candidate_info *info;
+	u8 i;
+	int ret;
+	u8 *pos;
+
+	if (!drv->fetch_bss_trans_status)
+		return NULL;
+
+	info = os_zalloc(sizeof(*info));
+	if (!info)
+		return NULL;
+	/* Allocate memory for number of candidates sent to driver */
+	info->candidates = os_calloc(params->n_candidates,
+				     sizeof(*info->candidates));
+	if (!info->candidates) {
+		os_free(info);
+		return NULL;
+	}
+
+	/* Copy the number of candidates being sent to driver. This is used in
+	 * nl80211_get_bss_transition_status_handler() to limit the number of
+	 * candidates that can be populated in info->candidates and will be
+	 * later overwritten with the actual number of candidates received from
+	 * the driver.
+	 */
+	info->num = params->n_candidates;
+
+	if (!(msg = nl80211_drv_msg(drv, 0, NL80211_CMD_VENDOR)) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_FETCH_BSS_TRANSITION_STATUS))
+		goto fail;
+
+	attr = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
+	if (!attr)
+		goto fail;
+
+	if (nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_BTM_MBO_TRANSITION_REASON,
+		       params->mbo_transition_reason))
+		goto fail;
+
+	attr1 = nla_nest_start(msg, QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO);
+	if (!attr1)
+		goto fail;
+
+	wpa_printf(MSG_DEBUG,
+		   "nl80211: WNM Candidate list info sending to driver: mbo_transition_reason: %d n_candidates: %d",
+		   params->mbo_transition_reason, params->n_candidates);
+	pos = params->bssid;
+	for (i = 0; i < params->n_candidates; i++) {
+		wpa_printf(MSG_DEBUG, "nl80211:   BSSID[%d]: " MACSTR, i,
+			   MAC2STR(pos));
+		attr2 = nla_nest_start(msg, i);
+		if (!attr2 ||
+		    nla_put(msg, QCA_WLAN_VENDOR_ATTR_BTM_CANDIDATE_INFO_BSSID,
+			    ETH_ALEN, pos))
+			goto fail;
+		pos += ETH_ALEN;
+		nla_nest_end(msg, attr2);
+	}
+
+	nla_nest_end(msg, attr1);
+	nla_nest_end(msg, attr);
+
+	ret = send_and_recv_msgs(drv, msg,
+				 nl80211_get_bss_transition_status_handler,
+				 info);
+	msg = NULL;
+	if (ret) {
+		wpa_printf(MSG_ERROR,
+			   "nl80211: WNM Get BSS transition status failed: ret=%d (%s)",
+			   ret, strerror(-ret));
+		goto fail;
+	}
+	return info;
+
+fail:
+	nlmsg_free(msg);
+	os_free(info->candidates);
+	os_free(info);
+	return NULL;
+}
+
+#endif /* CONFIG_MBO */
+
 #endif /* CONFIG_DRIVER_NL80211_QCA */
 
 static int nl80211_get_ext_capab(void *priv, enum wpa_driver_if_type type,
@@ -9382,6 +9679,9 @@ const struct wpa_driver_ops wpa_driver_nl80211_ops = {
 	.p2p_lo_stop = nl80211_p2p_lo_stop,
 	.set_default_scan_ies = nl80211_set_default_scan_ies,
 	.set_tdls_mode = nl80211_set_tdls_mode,
+#ifdef CONFIG_MBO
+	.get_bss_transition_status = nl80211_get_bss_transition_status,
+#endif /* CONFIG_MBO */
 #endif /* CONFIG_DRIVER_NL80211_QCA */
 	.get_ext_capab = nl80211_get_ext_capab,
 };

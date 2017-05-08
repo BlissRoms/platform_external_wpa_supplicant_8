@@ -103,6 +103,7 @@ OBJS += eap_register.o
 OBJS += ../src/utils/common.o
 OBJS += ../src/utils/wpa_debug.o
 OBJS += ../src/utils/wpabuf.o
+OBJS += op_classes.o
 OBJS_p = wpa_passphrase.o
 OBJS_p += ../src/utils/common.o
 OBJS_p += ../src/utils/wpa_debug.o
@@ -849,6 +850,9 @@ OBJS += ../src/ap/ieee802_11_ht.o
 ifdef CONFIG_IEEE80211AC
 OBJS += ../src/ap/ieee802_11_vht.o
 endif
+ifdef CONFIG_IEEE80211AX
+OBJS += ../src/ap/ieee802_11_he.o
+endif
 endif
 ifdef CONFIG_WNM
 OBJS += ../src/ap/wnm_ap.o
@@ -869,6 +873,9 @@ ifdef CONFIG_IEEE80211N
 CFLAGS += -DCONFIG_IEEE80211N
 ifdef CONFIG_IEEE80211AC
 CFLAGS += -DCONFIG_IEEE80211AC
+endif
+ifdef CONFIG_IEEE80211AX
+CFLAGS += -DCONFIG_IEEE80211AX
 endif
 endif
 

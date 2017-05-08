@@ -126,6 +126,29 @@ struct hostapd_channel_data {
 	unsigned int dfs_cac_ms;
 };
 
+#define HE_MAX_NUM_SS 		8
+#define HE_MAX_PHY_CAPAB_SIZE	3
+
+/**
+ * struct he_ppe_threshold - IEEE 802.11ax HE PPE Threshold
+ */
+struct he_ppe_threshold {
+	u32 numss_m1;
+	u32 ru_count;
+	u32 ppet16_ppet8_ru3_ru0[HE_MAX_NUM_SS];
+};
+
+/**
+ * struct he_capabilities - IEEE 802.11ax HE capabilities
+ */
+struct he_capabilities {
+	u8 he_supported;
+	u32 phy_cap[HE_MAX_PHY_CAPAB_SIZE];
+	u32 mac_cap;
+	u32 mcs;
+	struct he_ppe_threshold ppet;
+};
+
 #define HOSTAPD_MODE_FLAG_HT_INFO_KNOWN BIT(0)
 #define HOSTAPD_MODE_FLAG_VHT_INFO_KNOWN BIT(1)
 
@@ -184,6 +207,11 @@ struct hostapd_hw_modes {
 	u8 vht_mcs_set[8];
 
 	unsigned int flags; /* HOSTAPD_MODE_FLAG_* */
+
+	/**
+	 * he_capab - HE (IEEE 802.11ax) capabilities
+	 */
+	struct he_capabilities he_capab;
 };
 
 
@@ -440,6 +468,15 @@ struct wpa_driver_scan_params {
 	 unsigned int sched_scan_plans_num;
 
 	/**
+	 * sched_scan_start_delay - Delay to use before starting the first scan
+	 *
+	 * Delay (in seconds) before scheduling first scan plan cycle. The
+	 * driver may ignore this parameter and start immediately (or at any
+	 * other time), if this feature is not supported.
+	 */
+	 u32 sched_scan_start_delay;
+
+	/**
 	 * bssid - Specific BSSID to scan for
 	 *
 	 * This optional parameter can be used to replace the default wildcard
@@ -447,6 +484,20 @@ struct wpa_driver_scan_params {
 	 * only a single BSS.
 	 */
 	const u8 *bssid;
+
+	/**
+	 * scan_cookie - Unique identification representing the scan request
+	 *
+	 * This scan_cookie carries a unique identification representing the
+	 * scan request if the host driver/kernel supports concurrent scan
+	 * requests. This cookie is returned from the corresponding driver
+	 * interface.
+	 *
+	 * Note: Unlike other parameters in this structure, scan_cookie is used
+	 * only to return information instead of setting parameters for the
+	 * scan.
+	 */
+	u64 scan_cookie;
 
 	/*
 	 * NOTE: Whenever adding new parameters here, please make sure
@@ -933,6 +984,22 @@ struct wpa_driver_ap_params {
 	int *basic_rates;
 
 	/**
+	 * beacon_rate: Beacon frame data rate
+	 *
+	 * This parameter can be used to set a specific Beacon frame data rate
+	 * for the BSS. The interpretation of this value depends on the
+	 * rate_type (legacy: in 100 kbps units, HT: HT-MCS, VHT: VHT-MCS). If
+	 * beacon_rate == 0 and rate_type == 0 (BEACON_RATE_LEGACY), the default
+	 * Beacon frame data rate is used.
+	 */
+	unsigned int beacon_rate;
+
+	/**
+	 * beacon_rate_type: Beacon data rate type (legacy/HT/VHT)
+	 */
+	enum beacon_rate_type rate_type;
+
+	/**
 	 * proberesp - Probe Response template
 	 *
 	 * This is used by drivers that reply to Probe Requests internally in
@@ -1273,6 +1340,14 @@ struct wpa_driver_capa {
 #define WPA_DRIVER_FLAGS_FULL_AP_CLIENT_STATE	0x0000010000000000ULL
 /** Driver supports P2P Listen offload */
 #define WPA_DRIVER_FLAGS_P2P_LISTEN_OFFLOAD     0x0000020000000000ULL
+/** Driver supports Beacon frame TX rate configuration (legacy rates) */
+#define WPA_DRIVER_FLAGS_BEACON_RATE_LEGACY	0x0000080000000000ULL
+/** Driver supports Beacon frame TX rate configuration (HT rates) */
+#define WPA_DRIVER_FLAGS_BEACON_RATE_HT		0x0000100000000000ULL
+/** Driver supports Beacon frame TX rate configuration (VHT rates) */
+#define WPA_DRIVER_FLAGS_BEACON_RATE_VHT	0x0000200000000000ULL
+/** Driver supports HE capabilities */
+#define WPA_DRIVER_FLAGS_HE_CAPABILITIES	0x0002000000000000ULL
 	u64 flags;
 
 #define FULL_AP_CLIENT_STATE_SUPP(drv_flags) \
@@ -1699,6 +1774,20 @@ struct drv_acs_params {
 	const int *freq_list;
 };
 
+struct wpa_bss_trans_info {
+	u8 mbo_transition_reason;
+	u8 n_candidates;
+	u8 *bssid;
+};
+
+struct wpa_bss_candidate_info {
+	u8 num;
+	struct candidate_list {
+		u8 bssid[ETH_ALEN];
+		u8 is_accept;
+		u32 reject_reason;
+	} *candidates;
+};
 
 /**
  * struct wpa_driver_ops - Driver interface API definition
@@ -3536,9 +3625,12 @@ struct wpa_driver_ops {
 	/**
 	 * abort_scan - Request the driver to abort an ongoing scan
 	 * @priv: Private driver interface data
+	 * @scan_cookie: Cookie identifying the scan request. This is used only
+	 *	when the vendor interface QCA_NL80211_VENDOR_SUBCMD_TRIGGER_SCAN
+	 *	was used to trigger scan. Otherwise, 0 is used.
 	 * Returns 0 on success, -1 on failure
 	 */
-	int (*abort_scan)(void *priv);
+	int (*abort_scan)(void *priv, u64 scan_cookie);
 
 	/**
 	 * get_ext_capab - Get extended capabilities for the specified interface
@@ -3605,8 +3697,19 @@ struct wpa_driver_ops {
 	 * trigger control mode to the host driver.
 	 */
 	int (*set_tdls_mode)(void *priv, int tdls_external_control);
-};
 
+	/**
+	 * get_bss_transition_status - Get candidate BSS's transition status
+	 * @priv: Private driver interface data
+	 * @params: Candidate BSS list
+	 *
+	 * Get the accept or reject reason code for a list of BSS transition
+	 * candidates.
+	 */
+	struct wpa_bss_candidate_info *
+	(*get_bss_transition_status)(void *priv,
+				     struct wpa_bss_trans_info *params);
+};
 
 /**
  * enum wpa_event_type - Event type for wpa_supplicant_event() calls
@@ -4485,6 +4588,11 @@ union wpa_event_data {
 		 * than explicit rejection response from the AP.
 		 */
 		int timed_out;
+
+		/**
+		 * timeout_reason - Reason for the timeout
+		 */
+		const char *timeout_reason;
 	} assoc_reject;
 
 	struct timeout_event {

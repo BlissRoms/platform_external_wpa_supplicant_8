@@ -586,6 +586,24 @@ struct hostapd_bss_config {
 #endif /* CONFIG_MBO */
 };
 
+/**
+ * struct he_phy_capabilities_info - HE PHY capabilities
+ */
+struct he_phy_capabilities_info {
+	Boolean he_su_beamformer;
+	Boolean he_su_beamformee;
+	Boolean he_mu_beamformer;
+};
+
+/**
+ * struct he_operation - HE operation
+ */
+struct he_operation {
+	u8 he_bss_color;
+	u8 he_default_pe_duration;
+	u8 he_twt_required;
+	u8 he_rts_threshold;
+};
 
 /**
  * struct hostapd_config - Per-radio interface configuration
@@ -609,6 +627,8 @@ struct hostapd_config {
 
 	int *supported_rates;
 	int *basic_rates;
+	unsigned int beacon_rate;
+	enum beacon_rate_type rate_type;
 
 	const struct wpa_driver_ops *driver;
 	char *driver_params;
@@ -693,6 +713,12 @@ struct hostapd_config {
 	} *acs_chan_bias;
 	unsigned int num_acs_chan_bias;
 #endif /* CONFIG_ACS */
+
+	int ieee80211ax;
+#ifdef CONFIG_IEEE80211AX
+	struct he_phy_capabilities_info he_phy_capab;
+	struct he_operation he_op;
+#endif /* CONFIG_IEEE80211AX */
 };
 
 

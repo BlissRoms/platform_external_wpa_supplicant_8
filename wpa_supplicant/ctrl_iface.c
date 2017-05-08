@@ -4063,7 +4063,7 @@ static int print_bss_info(struct wpa_supplicant *wpa_s, struct wpa_bss *bss,
 	size_t i;
 	int ret;
 	char *pos, *end;
-	const u8 *ie, *ie2, *osen_ie;
+	const u8 *ie, *ie2, *osen_ie, *mesh;
 
 	pos = buf;
 	end = buf + buflen;
@@ -4172,13 +4172,16 @@ static int print_bss_info(struct wpa_supplicant *wpa_s, struct wpa_bss *bss,
 			return 0;
 		pos += ret;
 
+		mesh = wpa_bss_get_ie(bss, WLAN_EID_MESH_ID);
+
 		ie = wpa_bss_get_vendor_ie(bss, WPA_IE_VENDOR_TYPE);
 		if (ie)
 			pos = wpa_supplicant_ie_txt(pos, end, "WPA", ie,
 						    2 + ie[1]);
 		ie2 = wpa_bss_get_ie(bss, WLAN_EID_RSN);
 		if (ie2)
-			pos = wpa_supplicant_ie_txt(pos, end, "WPA2", ie2,
+			pos = wpa_supplicant_ie_txt(pos, end,
+						    mesh ? "RSN" : "WPA2", ie2,
 						    2 + ie2[1]);
 		osen_ie = wpa_bss_get_vendor_ie(bss, OSEN_IE_VENDOR_TYPE);
 		if (osen_ie)
@@ -4192,6 +4195,14 @@ static int print_bss_info(struct wpa_supplicant *wpa_s, struct wpa_bss *bss,
 				return 0;
 			pos += ret;
 		}
+
+		if (mesh) {
+			ret = os_snprintf(pos, end - pos, "[MESH]");
+			if (os_snprintf_error(end - pos, ret))
+				return 0;
+			pos += ret;
+		}
+
 		if (bss_is_dmg(bss)) {
 			const char *s;
 			ret = os_snprintf(pos, end - pos, "[DMG]");
@@ -5834,10 +5845,24 @@ static int p2p_ctrl_group_member(struct wpa_supplicant *wpa_s, const char *cmd,
 }
 
 
+static int wpas_find_p2p_dev_addr_bss(struct wpa_global *global,
+				      const u8 *p2p_dev_addr)
+{
+	struct wpa_supplicant *wpa_s;
+
+	for (wpa_s = global->ifaces; wpa_s; wpa_s = wpa_s->next) {
+		if (wpa_bss_get_p2p_dev_addr(wpa_s, p2p_dev_addr))
+			return 1;
+	}
+
+	return 0;
+}
+
+
 static int p2p_ctrl_peer(struct wpa_supplicant *wpa_s, char *cmd,
 			 char *buf, size_t buflen)
 {
-	u8 addr[ETH_ALEN], *addr_ptr;
+	u8 addr[ETH_ALEN], *addr_ptr, group_capab;
 	int next, res;
 	const struct p2p_peer_info *info;
 	char *pos, *end;
@@ -5866,6 +5891,16 @@ static int p2p_ctrl_peer(struct wpa_supplicant *wpa_s, char *cmd,
 	info = p2p_get_peer_info(wpa_s->global->p2p, addr_ptr, next);
 	if (info == NULL)
 		return -1;
+	group_capab = info->group_capab;
+
+	if (group_capab &&
+	    !wpas_find_p2p_dev_addr_bss(wpa_s->global, info->p2p_device_addr)) {
+		wpa_printf(MSG_DEBUG,
+			   "P2P: Could not find any BSS with p2p_dev_addr "
+			   MACSTR ", hence override group_capab from 0x%x to 0",
+			   MAC2STR(info->p2p_device_addr), group_capab);
+		group_capab = 0;
+	}
 
 	pos = buf;
 	end = buf + buflen;
@@ -5891,7 +5926,7 @@ static int p2p_ctrl_peer(struct wpa_supplicant *wpa_s, char *cmd,
 			  info->serial_number,
 			  info->config_methods,
 			  info->dev_capab,
-			  info->group_capab,
+			  group_capab,
 			  info->level);
 	if (os_snprintf_error(end - pos, res))
 		return pos - buf;

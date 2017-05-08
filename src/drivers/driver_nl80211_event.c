@@ -266,6 +266,7 @@ static void mlme_event_connect(struct wpa_driver_nl80211_data *drv,
 			       struct nlattr *addr, struct nlattr *req_ie,
 			       struct nlattr *resp_ie,
 			       struct nlattr *timed_out,
+			       struct nlattr *timeout_reason,
 			       struct nlattr *authorized,
 			       struct nlattr *key_replay_ctr,
 			       struct nlattr *ptk_kck,
@@ -324,6 +325,24 @@ static void mlme_event_connect(struct wpa_driver_nl80211_data *drv,
 		}
 		event.assoc_reject.status_code = status_code;
 		event.assoc_reject.timed_out = timed_out != NULL;
+		if (timed_out && timeout_reason) {
+			enum nl80211_timeout_reason reason;
+
+			reason = nla_get_u32(timeout_reason);
+			switch (reason) {
+			case NL80211_TIMEOUT_SCAN:
+				event.assoc_reject.timeout_reason = "scan";
+				break;
+			case NL80211_TIMEOUT_AUTH:
+				event.assoc_reject.timeout_reason = "auth";
+				break;
+			case NL80211_TIMEOUT_ASSOC:
+				event.assoc_reject.timeout_reason = "assoc";
+				break;
+			default:
+				break;
+			}
+		}
 		wpa_supplicant_event(drv->ctx, EVENT_ASSOC_REJECT, &event);
 		return;
 	}
@@ -917,6 +936,7 @@ static void mlme_event_join_ibss(struct wpa_driver_nl80211_data *drv,
 				 struct nlattr *tb[])
 {
 	unsigned int freq;
+	union wpa_event_data event;
 
 	if (tb[NL80211_ATTR_MAC] == NULL) {
 		wpa_printf(MSG_DEBUG, "nl80211: No address in IBSS joined "
@@ -936,7 +956,10 @@ static void mlme_event_join_ibss(struct wpa_driver_nl80211_data *drv,
 		drv->first_bss->freq = freq;
 	}
 
-	wpa_supplicant_event(drv->ctx, EVENT_ASSOC, NULL);
+	os_memset(&event, 0, sizeof(event));
+	event.assoc_info.freq = freq;
+
+	wpa_supplicant_event(drv->ctx, EVENT_ASSOC, &event);
 }
 
 
@@ -1647,7 +1670,7 @@ static void qca_nl80211_key_mgmt_auth(struct wpa_driver_nl80211_data *drv,
 			   tb[QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_BSSID],
 			   tb[QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_REQ_IE],
 			   tb[QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_RESP_IE],
-			   NULL,
+			   NULL, NULL,
 			   tb[QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_AUTHORIZED],
 			   tb[QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_KEY_REPLAY_CTR],
 			   tb[QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_PTK_KCK],
@@ -2162,6 +2185,7 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 				   tb[NL80211_ATTR_REQ_IE],
 				   tb[NL80211_ATTR_RESP_IE],
 				   tb[NL80211_ATTR_TIMED_OUT],
+				   tb[NL80211_ATTR_TIMEOUT_REASON],
 				   NULL, NULL, NULL, NULL, NULL);
 		break;
 	case NL80211_CMD_CH_SWITCH_NOTIFY:

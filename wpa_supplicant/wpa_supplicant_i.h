@@ -656,6 +656,12 @@ struct wpa_supplicant {
 	int normal_scans; /* normal scans run before sched_scan */
 	int scan_for_connection; /* whether the scan request was triggered for
 				  * finding a connection */
+	/*
+	 * A unique cookie representing the vendor scan request. This cookie is
+	 * returned from the driver interface. 0 indicates that there is no
+	 * pending vendor scan request.
+	 */
+	u64 curr_scan_cookie;
 #define MAX_SCAN_ID 16
 	int scan_id[MAX_SCAN_ID];
 	unsigned int scan_id_count;
@@ -1010,6 +1016,10 @@ struct wpa_supplicant {
 	struct neighbor_report *wnm_neighbor_report_elements;
 	struct os_reltime wnm_cand_valid_until;
 	u8 wnm_cand_from_bss[ETH_ALEN];
+#ifdef CONFIG_MBO
+	unsigned int wnm_mbo_trans_reason_present:1;
+	u8 wnm_mbo_transition_reason;
+#endif /* CONFIG_MBO */
 #endif /* CONFIG_WNM */
 
 #ifdef CONFIG_TESTING_GET_GTK
@@ -1186,8 +1196,6 @@ const u8 * wpas_mbo_get_bss_attr(struct wpa_bss *bss, enum mbo_attr_id attr);
 int wpas_mbo_update_non_pref_chan(struct wpa_supplicant *wpa_s,
 				  const char *non_pref_chan);
 void wpas_mbo_scan_ie(struct wpa_supplicant *wpa_s, struct wpabuf *ie);
-int wpas_mbo_supp_op_class_ie(struct wpa_supplicant *wpa_s, int freq, u8 *pos,
-			      size_t len);
 void wpas_mbo_ie_trans_req(struct wpa_supplicant *wpa_s, const u8 *ie,
 			   size_t len);
 size_t wpas_mbo_ie_bss_trans_reject(struct wpa_supplicant *wpa_s, u8 *pos,
@@ -1196,6 +1204,10 @@ size_t wpas_mbo_ie_bss_trans_reject(struct wpa_supplicant *wpa_s, u8 *pos,
 void wpas_mbo_update_cell_capa(struct wpa_supplicant *wpa_s, u8 mbo_cell_capa);
 struct wpabuf * mbo_build_anqp_buf(struct wpa_supplicant *wpa_s,
 				   struct wpa_bss *bss);
+
+/* op_classes.c */
+size_t wpas_supp_op_class_ie(struct wpa_supplicant *wpa_s, int freq, u8 *pos,
+			      size_t len);
 
 /**
  * wpa_supplicant_ctrl_iface_ctrl_rsp_handle - Handle a control response
