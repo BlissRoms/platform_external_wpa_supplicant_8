@@ -1,0 +1,5 @@
+[gerrit]
+host=review.blissroms.com
+port=29418
+project=platform_external_wpa_supplicant_8.git
+defaultbranch=o8.0
